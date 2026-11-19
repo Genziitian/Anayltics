@@ -10,7 +10,7 @@ import { config, forgetSite, type AppEnv, type Site } from './env';
 import { randomId } from './lib/crypto';
 import { handleGoalApi, handlePaymentApi, rematchPayments } from './payments';
 import { handleRazorpayWebhook, RazorpayApiError, syncRazorpay } from './razorpay';
-import { clientIp } from './lib/net';
+import { clientIp, geoOf, pickClientIp } from './lib/net';
 import { breakdown, customers, funnel, makeCtx, ONLINE_EVENTS, ONLINE_MS, overview, realtime, sparklines, visitorProfile, visitors, type FunnelStep } from './stats';
 
 const app = new Hono<AppEnv>();
@@ -102,12 +102,29 @@ app.use('/api/sites/*', requireAuth);
 app.use('/api/sites-overview', requireAuth);
 app.use('/api/auth/logout-all', requireAuth);
 app.use('/api/auth/activity', requireAuth);
+app.use('/api/auth/network', requireAuth);
 
 /** Sign out every browser, including this one. */
 app.post('/api/auth/logout-all', async (c) => {
   await endAllSessions();
   clearSession(c);
   return c.json({ ok: true });
+});
+
+/**
+ * What GI Tracker sees of your own connection: the IP it uses (for locations, sign-in limits and leaving your
+ * own visits out) and the proxy headers it came from. Open it once after deploying to check CLIENT_IP_HEADER.
+ */
+app.get('/api/auth/network', (c) => {
+  const ip = clientIp(c);
+  const headers = ['cf-connecting-ip', 'true-client-ip', 'x-forwarded-for', 'x-real-ip', 'cf-ipcountry'];
+  return c.json({
+    ip,
+    from: pickClientIp((n) => c.req.header(n), config.ipHeader)?.source ?? 'the connection itself (no proxy header)',
+    setting: config.ipHeader,
+    location: geoOf(c, ip),
+    headers: Object.fromEntries(headers.map((h) => [h, c.req.header(h) ?? null])),
+  });
 });
 
 // Recent sign-in attempts and the limits in force, for Settings → Sign-in security.

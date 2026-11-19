@@ -6,6 +6,7 @@ import { toPgPlaceholders } from '../src/server/db';
 import type { Site } from '../src/server/env';
 import { dodoPaymentInput } from '../src/server/dodo';
 import { verifyRazorpaySignature, verifyStandardWebhook } from '../src/server/lib/crypto';
+import { pickClientIp } from '../src/server/lib/net';
 import { bucketLabels, resolveRange, startOfDay, tzOffset } from '../src/server/lib/time';
 import { isBot, parseUA } from '../src/server/lib/ua';
 import { normalizePhone } from '../src/server/payments';
@@ -185,5 +186,19 @@ describe('Dodo Payments', () => {
   });
   it('still reads Minilytics-style ml_ metadata', () => {
     expect(dodoPaymentInput(site, { ...data, metadata: { ml_visitor_id: 'old' } }, 1).visitorId).toBe('old');
+  });
+});
+
+describe('client IP behind proxies', () => {
+  const from = (h: Record<string, string>) => (n: string) => h[n];
+  it('behind Caddy, uses the address Caddy appended (the last), not one the client made up', () => {
+    expect(pickClientIp(from({ 'x-forwarded-for': '6.6.6.6, 49.36.0.1' }), 'x-forwarded-for')).toEqual({ ip: '49.36.0.1', source: 'x-forwarded-for' });
+  });
+  it("on Render, trusts Cloudflare's header first, and falls back in order", () => {
+    const spec = 'cf-connecting-ip,true-client-ip,x-forwarded-for:first';
+    expect(pickClientIp(from({ 'cf-connecting-ip': '49.36.0.1', 'x-forwarded-for': '6.6.6.6, 10.0.0.1' }), spec)?.ip).toBe('49.36.0.1');
+    expect(pickClientIp(from({ 'true-client-ip': '49.36.0.2' }), spec)?.source).toBe('true-client-ip');
+    expect(pickClientIp(from({ 'x-forwarded-for': '49.36.0.3, 10.0.0.1' }), spec)).toEqual({ ip: '49.36.0.3', source: 'x-forwarded-for:first' });
+    expect(pickClientIp(from({}), spec)).toBeNull();
   });
 });

@@ -5,16 +5,28 @@ import { existsSync } from 'node:fs';
 import { config } from '../env';
 
 /**
- * The visitor's IP. Only the configured proxy header is trusted, so a client can't spoof its way past the
- * login lockout. For x-forwarded-for the last entry is the one our own proxy added.
+ * Where the visitor's IP comes from, as configured in CLIENT_IP_HEADER: headers tried in order, each optionally
+ * `:first` or `:last` for comma-separated lists. Only headers set by our own proxy can be trusted, so a client
+ * can't spoof its way past the login lockout or into the owner's excluded devices.
+ *  - Caddy / Nginx in front (the VPS setup): `x-forwarded-for` (the last entry is the one our proxy added)
+ *  - Render (behind Cloudflare): `cf-connecting-ip,true-client-ip,x-forwarded-for:first`
  */
-export function clientIp(c: Context): string {
-  const h = c.req.header(config.ipHeader);
-  if (h) {
-    const parts = h.split(',').map((s) => s.trim()).filter(Boolean);
-    const ip = config.ipHeader === 'x-forwarded-for' ? parts[parts.length - 1] : parts[0];
-    if (ip) return ip;
+export function pickClientIp(header: (name: string) => string | undefined, spec: string): { ip: string; source: string } | null {
+  for (const part of spec.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)) {
+    const [name, pos] = part.split(':');
+    const value = header(name);
+    if (!value) continue;
+    const ips = value.split(',').map((s) => s.trim()).filter(Boolean);
+    // A bare x-forwarded-for means our own proxy appended the last entry; other headers hold a single address.
+    const ip = (pos ?? (name === 'x-forwarded-for' ? 'last' : 'first')) === 'last' ? ips[ips.length - 1] : ips[0];
+    if (ip) return { ip, source: part };
   }
+  return null;
+}
+
+export function clientIp(c: Context): string {
+  const picked = pickClientIp((n) => c.req.header(n), config.ipHeader);
+  if (picked) return picked.ip;
   try {
     return getConnInfo(c).remote.address ?? 'unknown';
   } catch {

@@ -12,8 +12,8 @@ export const config = {
   /** Random string used to sign the login cookie. */
   sessionSecret: process.env.SESSION_SECRET ?? '',
   /**
-   * Header holding the real client IP, set by the reverse proxy in front of GI Tracker.
-   * Caddy/Nginx: x-forwarded-for (the last entry is used). Behind Cloudflare: cf-connecting-ip.
+   * Header(s) holding the real client IP, set by the proxy in front of GI Tracker, tried in order (see
+   * lib/net.ts). Caddy/Nginx: x-forwarded-for. Render: cf-connecting-ip,true-client-ip,x-forwarded-for:first.
    */
   ipHeader: (process.env.CLIENT_IP_HEADER ?? 'x-forwarded-for').toLowerCase(),
   /** Path to a GeoLite2/DB-IP City .mmdb file for visitor locations (npm run geoip:download). */

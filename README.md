@@ -67,6 +67,24 @@ RAZORPAY_API_BASE=http://localhost:8799 npm run dev:api      # in one terminal
 npm run smoke                                                # in another: end-to-end webhooks + attribution
 ```
 
+## Deploy on Render
+
+[`render.yaml`](render.yaml) sets up everything: the app (Docker, Singapore region, health checks, a deploy on every
+push to `main`) and a Postgres database. Render serves HTTPS itself.
+
+1. Render dashboard → **New → Blueprint** → connect this GitHub repository → **Apply**. Enter `ADMIN_EMAIL` and
+   `ADMIN_PASSWORD` when asked (at least 10 characters). `SESSION_SECRET` is generated for you.
+2. When the deploy is live, open the service → **Settings → Custom Domains** → add `analytics.genziitian.in`. Render
+   shows a CNAME target like `gi-tracker.onrender.com`.
+3. In Hostinger hPanel → **Domains → genziitian.in → DNS records**, add a **CNAME** named `analytics` pointing to
+   that target. Render verifies it and issues the certificate (usually within minutes).
+4. Open `https://analytics.genziitian.in/admin-login` and sign in. Then open
+   `https://analytics.genziitian.in/api/auth/network` once: `ip` and `location` should be your own. If they show a
+   Render or Cloudflare address instead, tell us. It's what `CLIENT_IP_HEADER` in `render.yaml` controls.
+
+The GeoIP database is downloaded when the app starts (about 15 seconds), so locations work from the first visit.
+Render Postgres takes daily backups on paid plans; the VPS backup script below isn't needed.
+
 ## Deploy on a VPS (Hostinger or any Ubuntu server)
 
 Everything runs in Docker Compose: Postgres, GI Tracker, and Caddy for automatic HTTPS. A 16 GB VPS handles tens of
