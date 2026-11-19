@@ -80,7 +80,8 @@ push to `main`) and a Postgres database. Render serves HTTPS itself.
    that target. Render verifies it and issues the certificate (usually within minutes).
 4. Open `https://analytics.genziitian.in/admin-login` and sign in. Then open
    `https://analytics.genziitian.in/api/auth/network` once: `ip` and `location` should be your own. If they show a
-   Render or Cloudflare address instead, tell us. It's what `CLIENT_IP_HEADER` in `render.yaml` controls.
+   Render or Cloudflare address instead, the `from` field says which header was used: adjust `CLIENT_IP_HEADER` in
+   `render.yaml` (the options are explained in `src/server/lib/net.ts`).
 
 The GeoIP database is downloaded when the app starts (about 15 seconds), so locations work from the first visit.
 Render Postgres takes daily backups on paid plans; the VPS backup script below isn't needed.
