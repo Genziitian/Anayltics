@@ -1,0 +1,70 @@
+# GI Tracker on one VPS: Postgres + app + Caddy (automatic HTTPS).
+#   cp .env.example .env   # fill in DOMAIN, ADMIN_PASSWORD, SESSION_SECRET, POSTGRES_PASSWORD
+#   docker compose up -d --build
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gitracker
+      POSTGRES_USER: gitracker
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # Tuned for a 16 GB VPS shared with the app. Lower these on smaller machines.
+    command: >
+      postgres
+      -c shared_buffers=3GB
+      -c effective_cache_size=9GB
+      -c work_mem=32MB
+      -c maintenance_work_mem=512MB
+      -c max_connections=100
+      -c random_page_cost=1.1
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gitracker -d gitracker"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://gitracker:${POSTGRES_PASSWORD}@postgres:5432/gitracker
+      GEOIP_DB: /data/geoip.mmdb
+      CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-x-forwarded-for}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - appdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8787/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_started
+
+volumes:
+  pgdata:
+  appdata:
+  caddy_data:
+  caddy_config:

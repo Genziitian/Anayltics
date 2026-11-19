@@ -1,0 +1,6 @@
+# Caddy gets and renews the HTTPS certificate for $DOMAIN by itself (ports 80 and 443 must be open).
+# It sets X-Forwarded-For to the real visitor IP, which GI Tracker uses for locations and the login lockout.
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:8787
+}
