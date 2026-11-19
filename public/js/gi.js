@@ -132,6 +132,7 @@
     if (lastPage !== null) flushTime(false);
     lastPage = page;
     pings = 0;
+    installRazorpayHook();
     send('pageview', firstView ? { r: d.referrer, u: cleanUrl(landingUrl()) } : { r: '' });
     firstView = false;
   }
@@ -173,7 +174,9 @@
     if (typeof handler === 'function') {
       o.handler = function (resp) {
         try {
-          if (resp && resp.razorpay_payment_id) {
+          // When our hook sits both inside and on top of another script's hook, report the payment once.
+          if (resp && resp.razorpay_payment_id && !resp.__giClaimed) {
+            try { resp.__giClaimed = true; } catch (e) {}
             send('claim', { p: { payment_id: resp.razorpay_payment_id, order_id: resp.razorpay_order_id, subscription_id: resp.razorpay_subscription_id } }, true);
           }
         } catch (e) {}
@@ -185,7 +188,10 @@
   function instrument(inst) {
     try {
       var open = inst.open;
-      if (typeof open === 'function') inst.open = function () { goal('razorpay_checkout_open'); return open.apply(inst, arguments); };
+      if (typeof open === 'function' && !inst.__giOpen) {
+        inst.__giOpen = true;
+        inst.open = function () { goal('razorpay_checkout_open'); return open.apply(inst, arguments); };
+      }
     } catch (e) {}
     return inst;
   }
@@ -210,22 +216,50 @@
       },
     });
   }
-  var rzp;
-  function setRazorpay(v) {
-    rzp = wrapRazorpay(v);
-  }
-  if (instrumentRazorpay) {
-    setRazorpay(w.Razorpay);
-    try {
-      Object.defineProperty(w, 'Razorpay', {
-        configurable: true,
-        enumerable: true,
-        get: function () { return rzp; },
-        set: setRazorpay,
-      });
-    } catch (e) {
-      if (rzp) w.Razorpay = rzp;
+  // The hook on window.Razorpay works alongside any other script that hooks it too (sites often do, e.g. to log
+  // payment attempts): an existing getter/setter is kept and ours goes on top, and if another script replaces
+  // ours later, installRazorpayHook() puts it back on top of theirs. It runs now, on load, on every route change,
+  // and right before any click or Enter, which is always before a checkout can open.
+  var rzpValue, rzpPrev = null;
+  var rzpProxies = typeof WeakMap === 'function' ? new WeakMap() : null;
+  function rzpWrapped(v) {
+    if (typeof v !== 'function' || v.__gi) return v;
+    var p = rzpProxies && rzpProxies.get(v);
+    if (!p) {
+      p = wrapRazorpay(v);
+      if (rzpProxies) rzpProxies.set(v, p);
     }
+    return p;
+  }
+  function rzpGet() {
+    return rzpWrapped(rzpPrev ? rzpPrev.get.call(w) : rzpValue);
+  }
+  function rzpSet(v) {
+    if (!rzpPrev) rzpValue = v;
+    else if (rzpPrev.set) rzpPrev.set.call(w, v);
+  }
+  function installRazorpayHook() {
+    if (!instrumentRazorpay) return;
+    var desc;
+    try { desc = Object.getOwnPropertyDescriptor(w, 'Razorpay'); } catch (e) { return; }
+    if (desc && desc.get === rzpGet) return;
+    if (desc && desc.configurable === false) return;
+    if (desc && (desc.get || desc.set)) {
+      rzpPrev = { get: desc.get || function () { return undefined; }, set: desc.set };
+    } else {
+      rzpPrev = null;
+      rzpValue = desc ? desc.value : undefined;
+    }
+    try {
+      Object.defineProperty(w, 'Razorpay', { configurable: true, enumerable: true, get: rzpGet, set: rzpSet });
+    } catch (e) {}
+  }
+  installRazorpayHook();
+  if (instrumentRazorpay) {
+    d.addEventListener('DOMContentLoaded', installRazorpayHook);
+    w.addEventListener('load', installRazorpayHook);
+    setTimeout(installRazorpayHook, 1000);
+    setTimeout(installRazorpayHook, 5000);
   }
 
   // ---- Dodo Payments checkout links carry the visitor as metadata. They're tagged as soon as they appear on the
@@ -264,6 +298,7 @@
   else tagCheckoutLinks();
   // Refresh right before a click starts, in case the session id rotated while the page sat idle.
   function onPress(e) {
+    installRazorpayHook();
     var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
     if (a) tagCheckoutLink(a);
   }

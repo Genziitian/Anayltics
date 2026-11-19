@@ -5,7 +5,9 @@ import { describe, expect, it } from 'vitest';
 const SOURCE = readFileSync(new URL('../public/js/gi.js', import.meta.url), 'utf8');
 
 /** Run the tracker in a tiny fake browser and collect what it sends. */
-function load(opts: { attrs?: Record<string, string>; razorpayFirst?: boolean; href?: string; openedAs?: string } = {}) {
+function load(opts: { attrs?: Record<string, string>; razorpayFirst?: boolean; href?: string; openedAs?: string; before?: (window: any) => void } = {}) {
+  const listeners: Record<string, ((e: any) => void)[]> = {};
+  const on = (type: string, fn: (e: any) => void) => (listeners[type] ??= []).push(fn);
   const attrs: Record<string, string> = { 'data-website-id': 'site1234', ...opts.attrs };
   const jar = new Map<string, string>();
   const sent: Promise<any>[] = [];
@@ -40,7 +42,7 @@ function load(opts: { attrs?: Record<string, string>; razorpayFirst?: boolean; h
     referrer: '',
     readyState: 'complete',
     visibilityState: 'visible',
-    addEventListener() {},
+    addEventListener: on,
     querySelectorAll: () => [],
   };
   const href = opts.href ?? 'https://shop.example.in/pricing';
@@ -68,6 +70,7 @@ function load(opts: { attrs?: Record<string, string>; razorpayFirst?: boolean; h
   };
   if (opts.razorpayFirst) window.Razorpay = FakeRazorpay;
   window.window = window;
+  opts.before?.(window);
   runInNewContext(SOURCE, {
     window,
     document,
@@ -84,7 +87,9 @@ function load(opts: { attrs?: Record<string, string>; razorpayFirst?: boolean; h
     setTimeout,
     setInterval: () => 0,
   });
-  return { window, FakeRazorpay, jar, sent: () => Promise.all(sent) };
+  /** A click somewhere on the page (the tracker listens in the capture phase). */
+  const press = () => (listeners.pointerdown ?? []).forEach((fn) => fn({ target: null }));
+  return { window, FakeRazorpay, jar, press, sent: () => Promise.all(sent) };
 }
 
 describe('tracker: Razorpay Checkout', () => {
@@ -176,5 +181,81 @@ describe('tracker: Dodo Payments and return pages', () => {
     const first = (await sent())[0];
     expect(first.t).toBe('pageview');
     expect(new URL(first.u).searchParams.get('payment_id')).toBe('pay_DodoAbc123');
+  });
+});
+
+/**
+ * class.genziitian.in hooks window.Razorpay itself, to log payment attempts and show its own popups. This is the
+ * same logic as its layout code: a getter/setter that wraps whatever checkout.js assigns, installed once.
+ */
+function siteHook(win: any, log: string[]) {
+  const MARK = '__genzWrapped';
+  function wrap(e: any) {
+    if (e[MARK]) return e;
+    function t(opts: any) {
+      const s = { ...opts };
+      const merchant = s.handler;
+      s.handler = async (r: any) => {
+        log.push('site-handler');
+        await merchant?.(r);
+      };
+      return new e(s);
+    }
+    Object.assign(t, e);
+    (t as any)[MARK] = true;
+    t.prototype = e.prototype;
+    return t;
+  }
+  if (win.__genzRzpInstalled) return;
+  win.__genzRzpInstalled = true;
+  let t = win.Razorpay ? wrap(win.Razorpay) : undefined;
+  Object.defineProperty(win, 'Razorpay', { configurable: true, get: () => t, set: (e) => (t = e ? wrap(e) : e) });
+}
+
+describe('tracker: alongside a site that hooks Razorpay itself', () => {
+  async function checkout(env: ReturnType<typeof load>, log: string[]) {
+    env.window.Razorpay = env.FakeRazorpay; // checkout.js loads
+    const merchant = (r: any) => log.push('merchant-handler:' + r.razorpay_payment_id);
+    new env.window.Razorpay({ key: 'k', amount: 49900, order_id: 'order_Abc123456', handler: merchant }).open();
+    const final = env.FakeRazorpay.seen[0];
+    await final.handler({ razorpay_payment_id: 'pay_Abc1234567', razorpay_order_id: 'order_Abc123456' });
+    const events = await env.sent();
+    return { final, claims: events.filter((e) => e.t === 'claim'), opens: events.filter((e) => e.n === 'razorpay_checkout_open') };
+  }
+
+  it("site hook installed first: both hooks run, the site's popups/logging keep working", async () => {
+    const log: string[] = [];
+    const env = load({ before: (w) => siteHook(w, log) });
+    const { final, claims, opens } = await checkout(env, log);
+    expect(final.notes.gi_visitor_id).toBe(env.jar.get('gi_vid'));
+    expect(log).toEqual(['site-handler', 'merchant-handler:pay_Abc1234567']);
+    expect(claims).toHaveLength(1);
+    expect(opens).toHaveLength(1);
+  });
+
+  it('site hook installed after ours (replacing it): we get back on top before checkout opens', async () => {
+    const log: string[] = [];
+    const env = load();
+    siteHook(env.window, log); // the site's code runs later and redefines window.Razorpay
+    env.press(); // the visitor clicks "Buy"
+    const { final, claims, opens } = await checkout(env, log);
+    expect(final.notes.gi_visitor_id).toBe(env.jar.get('gi_vid'));
+    expect(log).toEqual(['site-handler', 'merchant-handler:pay_Abc1234567']);
+    expect(claims).toHaveLength(1);
+    expect(opens).toHaveLength(1);
+  });
+
+  it('checkout.js loaded before both: our hook ends up inside and on top, still one claim and one open', async () => {
+    const log: string[] = [];
+    const env = load({ razorpayFirst: true });
+    siteHook(env.window, log); // wraps our proxy
+    env.press(); // we go on top again
+    const merchant = (r: any) => log.push('merchant-handler:' + r.razorpay_payment_id);
+    new env.window.Razorpay({ key: 'k', handler: merchant }).open();
+    await env.FakeRazorpay.seen[0].handler({ razorpay_payment_id: 'pay_Twice00001' });
+    const events = await env.sent();
+    expect(events.filter((e) => e.t === 'claim')).toHaveLength(1);
+    expect(events.filter((e) => e.n === 'razorpay_checkout_open')).toHaveLength(1);
+    expect(log).toEqual(['site-handler', 'merchant-handler:pay_Twice00001']);
   });
 });
